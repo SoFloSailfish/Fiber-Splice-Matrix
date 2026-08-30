@@ -198,19 +198,24 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   // when the toolbar wraps. This replaces a fixed pixel estimate that couldn't
   // account for every screen size / toolbar-wrap combination.
   const [viewH, setViewH] = useState(null);
-  useEffect(()=>{
-    const recompute=()=>{
-      const el=scrollRef.current; if(!el) return;
-      const top=el.getBoundingClientRect().top;
-      const h=Math.max(320, Math.floor(window.innerHeight - top - 14));
-      setViewH(h);
-    };
-    recompute();
-    window.addEventListener("resize", recompute);
-    // Re-measure shortly after mount in case fonts/layout settle late.
-    const t=setTimeout(recompute, 60);
-    return ()=>{ window.removeEventListener("resize", recompute); clearTimeout(t); };
+  const recomputeViewH = useCallback(()=>{
+    const el=scrollRef.current; if(!el) return;
+    const top=el.getBoundingClientRect().top;
+    const h=Math.max(320, Math.floor(window.innerHeight - top - 30));
+    setViewH(h);
   }, []);
+  useEffect(()=>{
+    recomputeViewH();
+    // Re-measure after the browser has painted, so we read the settled position
+    // (fonts, toolbar wrapping, and the optional info panel all affect `top`).
+    const raf=requestAnimationFrame(recomputeViewH);
+    const t=setTimeout(recomputeViewH, 120);
+    window.addEventListener("resize", recomputeViewH);
+    return ()=>{ window.removeEventListener("resize", recomputeViewH); cancelAnimationFrame(raf); clearTimeout(t); };
+  }, [recomputeViewH]);
+  // The info panel appears above the toolbar when a fiber is hovered/selected,
+  // shifting the viewport down — re-measure so height stays exact.
+  useEffect(()=>{ recomputeViewH(); }, [selected, hovered, recomputeViewH]);
   const panRef = useRef({active:false, sx:0, sy:0, sl:0, st:0, moved:false});
   const [panning, setPanning] = useState(false);
   const onPanDown=(e)=>{ if(e.button!==0&&e.button!==1) return; const el=scrollRef.current; if(!el) return; panRef.current={active:true, sx:e.clientX, sy:e.clientY, sl:el.scrollLeft, st:el.scrollTop, moved:false}; setPanning(true); };
@@ -714,7 +719,7 @@ function App() {
   const toolBtn=(extra)=>({ fontSize:11,padding:"4px 10px",borderRadius:6,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.text,cursor:"pointer", ...extra });
 
   return (
-    <div style={{fontFamily:"system-ui,sans-serif",padding:"0 0 24px",background:T.appBg,minHeight:"100vh",transition:"background 0.2s"}}>
+    <div style={{fontFamily:"system-ui,sans-serif",padding:"0 0 24px",boxSizing:"border-box",background:T.appBg,minHeight:"100vh",transition:"background 0.2s"}}>
       <input type="file" ref={fileInputRef} accept="application/json,.json" onChange={onFileChosen} style={{display:"none"}}/>
       <div style={{background:T.banner,padding:"8px 14px",marginBottom:12,display:"flex",alignItems:"center",position:"relative"}}>
         <LeeCountyLogo height={52}/>
