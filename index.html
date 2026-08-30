@@ -22,7 +22,7 @@
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel">
+<script type="text/jsx-app" id="app-src">
 const { useState, useCallback, useRef, useEffect } = React;
 
 const STORAGE_KEY = "fiberSpliceMatrix.v1";
@@ -922,21 +922,44 @@ function App() {
     </div>
   );
 }
+</script>
 
-// Wait until React, ReactDOM, and Babel-transformed code are all ready.
-// On a cold/slow load the libraries can lag; retry until React exists.
-(function mount(tries){
-  if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
-    if (tries > 100) {
+<script>
+// This block runs as plain JS (it is NOT type="text/babel", so Babel does
+// not auto-execute the app before React is ready). We wait until React,
+// ReactDOM, AND Babel are all present, then transpile the JSX source and
+// run it ourselves. This guarantees `React` exists at the moment the app
+// module executes — the previous version could execute the JSX block's
+// top-level `= React` destructure before React had attached, throwing
+// "React is not defined".
+(function boot(tries){
+  var ready = typeof React !== "undefined"
+           && typeof ReactDOM !== "undefined"
+           && typeof Babel !== "undefined";
+  if (!ready) {
+    if (tries > 200) {
       document.getElementById("root").innerHTML =
         '<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">'
-        + 'Could not load React from the network.\n\nIf you are offline, open the app once while connected '
-        + 'so it can cache. Otherwise check your internet connection and reload.</pre>';
+        + 'Could not load React/Babel from the network.\n\nIf you are offline, open the app once while '
+        + 'connected so it can cache. Otherwise check your internet connection and reload.</pre>';
       return;
     }
-    return setTimeout(function(){ mount(tries+1); }, 50);
+    return setTimeout(function(){ boot(tries+1); }, 50);
   }
-  ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  try {
+    var src = document.getElementById("app-src").textContent;
+    // Force the CLASSIC runtime: JSX compiles to React.createElement(...)
+    // instead of importing "react/jsx-runtime" (which has no loader here).
+    var out = Babel.transform(src, {
+      presets: [["react", { runtime: "classic" }]]
+    }).code;
+    (0, eval)(out);            // App is now defined in this scope's closure via eval
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  } catch (err) {
+    document.getElementById("root").innerHTML =
+      '<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">Startup error:\n'
+      + (err && (err.message || err)) + '\n\n' + ((err && err.stack) || "") + '</pre>';
+  }
 })(0);
 </script>
 <script>
