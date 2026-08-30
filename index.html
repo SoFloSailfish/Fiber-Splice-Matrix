@@ -923,7 +923,21 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+// Wait until React, ReactDOM, and Babel-transformed code are all ready.
+// On a cold/slow load the libraries can lag; retry until React exists.
+(function mount(tries){
+  if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
+    if (tries > 100) {
+      document.getElementById("root").innerHTML =
+        '<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">'
+        + 'Could not load React from the network.\n\nIf you are offline, open the app once while connected '
+        + 'so it can cache. Otherwise check your internet connection and reload.</pre>';
+      return;
+    }
+    return setTimeout(function(){ mount(tries+1); }, 50);
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+})(0);
 </script>
 <script>
   // Register the service worker so the app works offline after first load.
