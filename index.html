@@ -192,6 +192,25 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   const nudge=(delta)=>applyZoom(Math.round(zoom*100)+delta);
 
   const scrollRef = useRef(null);
+  // Measured viewport height: fill from the top of the diagram window to the
+  // bottom of the browser window, so the diagram scrolls WITHIN this box and
+  // the page itself never needs a second scrollbar. Recomputed on resize and
+  // when the toolbar wraps. This replaces a fixed pixel estimate that couldn't
+  // account for every screen size / toolbar-wrap combination.
+  const [viewH, setViewH] = useState(null);
+  useEffect(()=>{
+    const recompute=()=>{
+      const el=scrollRef.current; if(!el) return;
+      const top=el.getBoundingClientRect().top;
+      const h=Math.max(320, Math.floor(window.innerHeight - top - 14));
+      setViewH(h);
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    // Re-measure shortly after mount in case fonts/layout settle late.
+    const t=setTimeout(recompute, 60);
+    return ()=>{ window.removeEventListener("resize", recompute); clearTimeout(t); };
+  }, []);
   const panRef = useRef({active:false, sx:0, sy:0, sl:0, st:0, moved:false});
   const [panning, setPanning] = useState(false);
   const onPanDown=(e)=>{ if(e.button!==0&&e.button!==1) return; const el=scrollRef.current; if(!el) return; panRef.current={active:true, sx:e.clientX, sy:e.clientY, sl:el.scrollLeft, st:el.scrollTop, moved:false}; setPanning(true); };
@@ -360,7 +379,7 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
       {pairs.length===0&&cables.length>0&&<div style={{textAlign:"center",padding:"20px 0",color:T.textDim,fontSize:12}}>No splices yet — add splices in the Matrix tab.</div>}
       <div ref={scrollRef}
         onMouseDown={onPanDown} onMouseMove={onPanMove} onMouseUp={endPan} onMouseLeave={endPan} onClickCapture={onPanClickCapture}
-        style={{overflowX:"auto",overflowY:"auto",height:"calc(100vh - 210px)",minHeight:360,border:`0.5px solid ${T.border}`,borderRadius:6,background:SHEET_BG,cursor:panning?"grabbing":"grab",userSelect:"none"}}>
+        style={{overflowX:"auto",overflowY:"auto",height:viewH?viewH:"calc(100vh - 210px)",minHeight:320,border:`0.5px solid ${T.border}`,borderRadius:6,background:SHEET_BG,cursor:panning?"grabbing":"grab",userSelect:"none"}}>
         <div style={{width:SVG_W*zoom, height:TOTAL_H*zoom, position:"relative"}}>
           <svg ref={diagramRef} width={SVG_W} height={TOTAL_H}
             style={{display:"block",background:SHEET_BG,transformOrigin:"top left",transform:`scale(${zoom})`}}>
