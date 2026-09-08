@@ -262,7 +262,7 @@ function ColorDot({ color, size=10 }) {
 
 const FIBER_COL_W = 28;
 const FIBER_ROW_H = 20;
-const HDR_H       = 52;
+const HDR_H       = 68;
 const CAB_GAP     = 20;
 const MARGIN      = 12;
 const TITLE_H     = 74;
@@ -441,8 +441,18 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
     elems.push(<rect key="bg" x={x} y={y} width={w} height={h} rx={6} fill="#f0f4f8" stroke={dirColor} strokeWidth={1}/>);
     const hdrY=edge==="north"?y:y+h-HDR_H;
     elems.push(<rect key="hdr" x={x} y={hdrY} width={w} height={HDR_H} rx={5} fill={dirColor}/>);
-    elems.push(<text key="hn" x={x+w/2} y={hdrY+19} textAnchor="middle" dominantBaseline="central" style={{fontSize:17,fontWeight:700,fill:"#fff"}}>C{ci+1} – {cab.name}</text>);
-    elems.push(<text key="hs" x={x+w/2} y={hdrY+38} textAnchor="middle" dominantBaseline="central" style={{fontSize:13,fontWeight:600,fill:"#e8f1ff"}}>{cab.direction} · {cab.size}F · {nSpl} spliced{cab.location?` · ${cab.location}`:""}</text>);
+    // Single centred line: cable name at full size, detail smaller beside it.
+    const nameSize   = Math.max(15, Math.min(46, w/18));
+    const detailSize = Math.max(11, Math.min(26, w/40));
+    elems.push(
+      <text key="hn" x={x+w/2} y={hdrY+HDR_H/2} textAnchor="middle" dominantBaseline="central"
+        style={{fontSize:nameSize,fontWeight:800,fill:"#fff"}}>
+        C{ci+1} – {cab.name}
+        <tspan style={{fontSize:detailSize,fontWeight:600,fill:"#e8f1ff"}}>
+          {"   "}·{"   "}{cab.direction} · {cab.size}F · {nSpl} spliced{cab.location?` · ${cab.location}`:""}
+        </tspan>
+      </text>
+    );
     const innerY=edge==="north"?y+HDR_H:y;
     const innerH=h-HDR_H;
     const portEdgeY=edge==="north"?y+h:y;
@@ -487,7 +497,9 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
     elems.push(<rect key="bg" x={x} y={y} width={w} height={h} rx={6} fill="#f0f4f8" stroke={dirColor} strokeWidth={1}/>);
     const hdrX=edge==="west"?x:x+w-HDR_H;
     elems.push(<rect key="hdr" x={hdrX} y={y} width={HDR_H} height={h} rx={5} fill={dirColor}/>);
-    elems.push(<text key="ht" x={hdrX+HDR_H/2} y={y+h/2} textAnchor="middle" dominantBaseline="central" transform={`rotate(-90,${hdrX+HDR_H/2},${y+h/2})`} style={{fontSize:15,fontWeight:700,fill:"#fff"}}>C{ci+1} – {cab.name} · {cab.direction} · {nSpl} spliced</text>);
+    // Rotated header: scale to the cable's height so tall cables get big text.
+    const vSize = Math.max(15, Math.min(42, h/20));
+    elems.push(<text key="ht" x={hdrX+HDR_H/2} y={y+h/2} textAnchor="middle" dominantBaseline="central" transform={`rotate(-90,${hdrX+HDR_H/2},${y+h/2})`} style={{fontSize:vSize,fontWeight:800,fill:"#fff"}}>C{ci+1} – {cab.name}  ·  {cab.direction} · {cab.size}F · {nSpl} spliced</text>);
     const portEdgeX=edge==="west"?x+w:x;
     const innerX=edge==="west"?hdrX+HDR_H:x;
     const innerW=w-HDR_H;
