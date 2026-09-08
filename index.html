@@ -164,10 +164,14 @@ async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
                alignment:{horizontal:"center",vertical:"center",wrapText:true}, border };
 
   // Sheet 1 — every fibre
-  const head=["Cable No","Cable Name","Direction","Side","Size","Location",
+  const head=["Cable No","Cable Name","Direction","Side","Size","Cable Route",
               "Buffer Tube No","Buffer Tube Color","Fiber No","Fiber Color","Fiber ID",
               "Status","Spliced To Cable","Spliced To Buffer","Spliced To Fiber"];
-  const rows=[head], paint=[];
+  const siteLine=`${nodeInfo.node||"(no location)"}${nodeInfo.enclosure?`  ·  ${nodeInfo.enclosure}`:""}`;
+  const subLine=[nodeInfo.address||"", nodeInfo.handhole?`Hand Hole ${nodeInfo.handhole}`:"",
+                 `Exported ${new Date().toLocaleString()}`].filter(Boolean).join("   ·   ");
+  const HR=3;                        // header row index (0-based)
+  const rows=[[siteLine],[subLine],[],head], paint=[];
   cables.forEach((cab,ci)=>{
     getTubes(cab).forEach(({ti,tubeColor,fibers})=>{
       fibers.forEach(fi=>{
@@ -191,10 +195,14 @@ async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
   });
   const ws=X.utils.aoa_to_sheet(rows);
   ws["!cols"]=[{wch:8},{wch:22},{wch:10},{wch:7},{wch:7},{wch:22},{wch:14},{wch:16},{wch:8},{wch:12},{wch:11},{wch:9},{wch:24},{wch:18},{wch:16}];
-  ws["!autofilter"]={ref:X.utils.encode_range({s:{r:0,c:0},e:{r:rows.length-1,c:head.length-1}})};
-  ws["!views"]=[{state:"frozen",ySplit:1}];
-  for(let c=0;c<head.length;c++){ const a=X.utils.encode_cell({r:0,c}); if(ws[a]) ws[a].s=HEAD; }
-  for(let r=1;r<rows.length;r++) for(let c=0;c<head.length;c++){
+  ws["!merges"]=[{s:{r:0,c:0},e:{r:0,c:head.length-1}},{s:{r:1,c:0},e:{r:1,c:head.length-1}}];
+  ws["!autofilter"]={ref:X.utils.encode_range({s:{r:HR,c:0},e:{r:rows.length-1,c:head.length-1}})};
+  ws["!views"]=[{state:"frozen",ySplit:HR+1}];
+  ws["!rows"]=[{hpt:26},{hpt:15},{hpt:6}];
+  if(ws["A1"]) ws["A1"].s={font:{bold:true,sz:16,color:{rgb:"FF1A5276"}},alignment:{horizontal:"left",vertical:"center"}};
+  if(ws["A2"]) ws["A2"].s={font:{sz:10,color:{rgb:"FF475569"}},alignment:{horizontal:"left",vertical:"center"}};
+  for(let c=0;c<head.length;c++){ const a=X.utils.encode_cell({r:HR,c}); if(ws[a]) ws[a].s=HEAD; }
+  for(let r=HR+1;r<rows.length;r++) for(let c=0;c<head.length;c++){
     const a=X.utils.encode_cell({r,c}); if(ws[a]) ws[a].s={border,font:{sz:10},alignment:{vertical:"center"}};
   }
   paint.forEach(({r,c,fill,ink})=>{ const a=X.utils.encode_cell({r,c});
@@ -204,7 +212,8 @@ async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
 
   // Sheet 2 — splice schedule
   const h2=["#","Cable A","Dir A","Buffer Tube A","Fiber A","Cable B","Dir B","Buffer Tube B","Fiber B"];
-  const r2=[h2], paint2=[]; const seen=new Set(); let n=0;
+  const HR2=3;
+  const r2=[[siteLine],[subLine],[],h2], paint2=[]; const seen=new Set(); let n=0;
   for(const [k,v] of Object.entries(splices)){
     if(seen.has(k)||seen.has(v)) continue; seen.add(k); seen.add(v);
     const [aci,afi]=k.split(":").map(Number),[bci,bfi]=v.split(":").map(Number);
@@ -220,10 +229,14 @@ async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
   }
   const ws2=X.utils.aoa_to_sheet(r2);
   ws2["!cols"]=[{wch:5},{wch:24},{wch:9},{wch:18},{wch:16},{wch:24},{wch:9},{wch:18},{wch:16}];
-  ws2["!autofilter"]={ref:X.utils.encode_range({s:{r:0,c:0},e:{r:Math.max(r2.length-1,1),c:h2.length-1}})};
-  ws2["!views"]=[{state:"frozen",ySplit:1}];
-  for(let c=0;c<h2.length;c++){ const a=X.utils.encode_cell({r:0,c}); if(ws2[a]) ws2[a].s=HEAD; }
-  for(let r=1;r<r2.length;r++) for(let c=0;c<h2.length;c++){
+  ws2["!merges"]=[{s:{r:0,c:0},e:{r:0,c:h2.length-1}},{s:{r:1,c:0},e:{r:1,c:h2.length-1}}];
+  ws2["!autofilter"]={ref:X.utils.encode_range({s:{r:HR2,c:0},e:{r:Math.max(r2.length-1,HR2+1),c:h2.length-1}})};
+  ws2["!views"]=[{state:"frozen",ySplit:HR2+1}];
+  ws2["!rows"]=[{hpt:26},{hpt:15},{hpt:6}];
+  if(ws2["A1"]) ws2["A1"].s={font:{bold:true,sz:16,color:{rgb:"FF1A5276"}},alignment:{horizontal:"left",vertical:"center"}};
+  if(ws2["A2"]) ws2["A2"].s={font:{sz:10,color:{rgb:"FF475569"}},alignment:{horizontal:"left",vertical:"center"}};
+  for(let c=0;c<h2.length;c++){ const a=X.utils.encode_cell({r:HR2,c}); if(ws2[a]) ws2[a].s=HEAD; }
+  for(let r=HR2+1;r<r2.length;r++) for(let c=0;c<h2.length;c++){
     const a=X.utils.encode_cell({r,c}); if(ws2[a]) ws2[a].s={border,font:{sz:10},alignment:{vertical:"center"}};
   }
   paint2.forEach(({r,c,fill,ink})=>{ const a=X.utils.encode_cell({r,c});
@@ -246,6 +259,12 @@ async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
   X.utils.book_append_sheet(wb, ws,  "Fiber Detail");
   X.utils.book_append_sheet(wb, ws2, "Splice Schedule");
   X.utils.book_append_sheet(wb, ws3, "Job Info");
+  // Repeat the site header + column headings at the top of every printed page.
+  wb.Workbook = wb.Workbook || {};
+  wb.Workbook.Names = [
+    { Name:"_xlnm.Print_Titles", Sheet:0, Ref:`'Fiber Detail'!$1:${HR+1}` },
+    { Name:"_xlnm.Print_Titles", Sheet:1, Ref:`'Splice Schedule'!$1:${HR2+1}` },
+  ];
   X.writeFile(wb, `splice_matrix_${(nodeInfo.node||"node").replace(/\s+/g,"_")}.xlsx`);
   setMsg("Exported Excel workbook"); setTimeout(()=>setMsg(""),3000);
 }
