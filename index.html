@@ -16,7 +16,6 @@
   #root{min-height:100vh;}
   *{box-sizing:border-box;}
 </style>
-<script>window.addEventListener("error",function(e){if(!document.getElementById("root").hasChildNodes()){document.getElementById("root").innerHTML='<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">Startup error:\n'+(e.message||e.error)+'\n\n'+((e.error&&e.error.stack)||"")+'</pre>';}});</script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -77,7 +76,179 @@ function getFiber(gi) {
   const ti=Math.floor(gi/12), fi=gi%12;
   return { tube:ti, tubeColor:TUBE_COLORS[ti%12], fiberColor:FIBER_COLORS_12[fi], label:`BT${ti+1}-F${fi+1}` };
 }
-function makeCable(n) { return { name:`Cable ${n}`, direction:"North", size:12, location:"", node:"" }; }
+function makeCable(n) { return { name:`Cable ${n}`, direction:"North", size:12, location:"", node:"", side:(n%2? "left":"right") }; }
+
+// 24 visually distinct splice-line colours — enough for a 288F cable (24
+// buffer tubes). Ordered around the wheel so neighbouring entries in a list
+// stay tellable apart, with neutrals at the end.
+const PALETTE_24 = [
+  { name:"Crimson",   hex:"#DC143C" },
+  { name:"Red",       hex:"#E11D48" },
+  { name:"Orange",    hex:"#EA580C" },
+  { name:"Amber",     hex:"#F59E0B" },
+  { name:"Gold",      hex:"#CA8A04" },
+  { name:"Olive",     hex:"#7C7A0B" },
+  { name:"Lime",      hex:"#65A30D" },
+  { name:"Green",     hex:"#16A34A" },
+  { name:"Emerald",   hex:"#059669" },
+  { name:"Teal",      hex:"#0D9488" },
+  { name:"Cyan",      hex:"#0891B2" },
+  { name:"Sky",       hex:"#0EA5E9" },
+  { name:"Azure",     hex:"#2563EB" },
+  { name:"Blue",      hex:"#1D4ED8" },
+  { name:"Indigo",    hex:"#4F46E5" },
+  { name:"Violet",    hex:"#7C3AED" },
+  { name:"Purple",    hex:"#9333EA" },
+  { name:"Magenta",   hex:"#C026D3" },
+  { name:"Pink",      hex:"#DB2777" },
+  { name:"Rose",      hex:"#F43F5E" },
+  { name:"Brown",     hex:"#92400E" },
+  { name:"Tan",       hex:"#A16207" },
+  { name:"Slate",     hex:"#475569" },
+  { name:"Charcoal",  hex:"#1F2937" },
+];
+
+// Splice-line routing palette. Per Splice.me rule 4.7 splices may be coloured
+// but NOT by the fibre colour code — colour here distinguishes buffer-tube
+// groups so each run can be followed, rather than restating TIA-598.
+const ROUTE_COLORS = [
+  "#0ea5e9", "#e11d48", "#16a34a", "#f59e0b", "#7c3aed", "#0891b2",
+  "#db2777", "#65a30d", "#ea580c", "#4f46e5", "#0d9488", "#b45309",
+];
+// Selectable splice colours: the 12 TIA buffer-tube colours first (prefixed so
+// they're distinguishable from the extended set), then the extended palette for
+// cables with more than 12 buffer tubes.
+const SPLICE_PALETTE = [
+  ...FIBER_COLORS_12.map(c=>({ name:`BT ${c.name}`, hex:c.hex })),
+  ...PALETTE_24.map(p=>({ name:p.name, hex:p.hex })),
+];
+
+function routeColor(ci, fi){
+  const ti = Math.floor(fi/12);
+  // Buffer tubes 1–12 default to their own TIA-598 tube colour. Past 12 (e.g.
+  // a 288F cable) fall through to the extended palette so they stay distinct.
+  if(ti < 12) return TUBE_COLORS[ti].hex;
+  return PALETTE_24[(ti + ci*5) % PALETTE_24.length].hex;
+}
+
+// ══ Ledger (two-column) layout ══════════════════════════════════════════
+// Per Splice.me guidance: cable faces are vertical only, arranged in two
+// columns with the splice field between them. No horizontal faces means no
+// 90° splice bends and no rectangular intersection grid, so every strand
+// stays traceable.
+const LED_ROW_H=15, LED_HDR=34, LED_GAP=20, LED_COL_W=210, LED_MARGIN=16, LED_MID=760;
+
+// Gutter width needed so every same-column lane fits at comfortable spacing.
+// The sheet grows rather than compressing lanes into an unreadable band.
+function ledgerGutter(cables, splices){
+  const sideOf={}; cables.forEach((c,ci)=>{ sideOf[ci]= (c.side==="right"?"right":"left"); });
+  const seen=new Set(); const count={left:0,right:0};
+  for(const [k,v] of Object.entries(splices)){
+    if(seen.has(k)||seen.has(v)) continue; seen.add(k); seen.add(v);
+    const aci=Number(k.split(":")[0]), bci=Number(v.split(":")[0]);
+    if(sideOf[aci]!==undefined && sideOf[aci]===sideOf[bci]) count[sideOf[aci]]++;
+  }
+  const maxSame=Math.max(count.left,count.right);
+  const LANE_SP=22, PAD=140;
+  return Math.max(LED_MID, maxSame*LANE_SP + PAD);
+}
+
+function buildLedger(cables, splices){
+  const left=[], right=[];
+  cables.forEach((cab,ci)=>{ ((cab.side==="right")?right:left).push({cab,ci}); });
+  const blockH=(cab)=>LED_HDR+cab.size*LED_ROW_H;
+  const colH=(arr)=>arr.reduce((s,{cab})=>s+blockH(cab)+LED_GAP,0)-(arr.length?LED_GAP:0);
+  const H=Math.max(520, Math.max(colH(left),colH(right),0)+LED_MARGIN*2);
+  const gutter=ledgerGutter(cables, splices||{});
+  const W=LED_COL_W*2+gutter+LED_MARGIN*2;
+  const blocks={};
+  const place=(arr,x,side)=>{ let y=LED_MARGIN; arr.forEach(({cab,ci})=>{ const h=blockH(cab); blocks[ci]={ci,cab,x,y,w:LED_COL_W,h,side}; y+=h+LED_GAP; }); };
+  place(left, LED_MARGIN, "left");
+  place(right, W-LED_MARGIN-LED_COL_W, "right");
+  return {W,H,blocks,gutter};
+}
+
+function ledgerPort(LED,ci,fi){
+  const b=LED.blocks[ci]; if(!b) return null;
+  return { x: b.side==="left" ? b.x+b.w : b.x,
+           y: b.y+LED_HDR+fi*LED_ROW_H+LED_ROW_H/2,
+           side:b.side };
+}
+
+function renderLedgerCable(b, splices){
+  const {ci,cab,x,y,w,h,side}=b;
+  const dirColor=DIR_COLORS[cab.direction]||"#1a56a0";
+  const els=[];
+  let nSpl=0; for(const k of Object.keys(splices)) if(Number(k.split(":")[0])===ci) nSpl++;
+  els.push(<rect key="bg" x={x} y={y} width={w} height={h} rx={4} fill="#ffffff" stroke="#94a3b8" strokeWidth={1}/>);
+  els.push(<rect key="hdr" x={x} y={y} width={w} height={LED_HDR} rx={4} fill={dirColor}/>);
+  els.push(<rect key="hdr2" x={x} y={y+LED_HDR-6} width={w} height={6} fill={dirColor}/>);
+  els.push(<text key="t1" x={x+8} y={y+13} dominantBaseline="central" style={{fontSize:12,fontWeight:700,fill:"#fff"}}>C{ci+1} – {cab.name}</text>);
+  els.push(<text key="t2" x={x+8} y={y+26} dominantBaseline="central" style={{fontSize:9,fontWeight:600,fill:"#e8f1ff"}}>{cab.direction} · {cab.size}F · {nSpl} spliced{cab.location?` · ${cab.location}`:""}</text>);
+  const tubes=getTubes(cab);
+  let seq=0;
+  tubes.forEach(({ti,tubeColor,fibers})=>{
+    const bandY=y+LED_HDR+seq*LED_ROW_H;
+    const bandH=fibers.length*LED_ROW_H;
+    els.push(<rect key={`bt${ti}`} x={x+1} y={bandY} width={w-2} height={bandH} fill={tubeColor.hex} fillOpacity={0.14}/>);
+    // Tube colour rail on the OUTER edge (away from the splice field)
+    const railX = side==="left" ? x+1 : x+w-6;
+    els.push(<rect key={`btl${ti}`} x={railX} y={bandY} width={5} height={bandH} fill={tubeColor.hex}/>);
+    // BT label runs vertically along the rail so it can never overwrite a row
+    const labX = side==="left" ? x+13 : x+w-13;
+    els.push(<text key={`btt${ti}`} x={labX} y={bandY+bandH/2} textAnchor="middle" dominantBaseline="central"
+      transform={`rotate(-90,${labX},${bandY+bandH/2})`}
+      style={{fontSize:8.5,fontWeight:700,fill:tubeColor.hex}}>BT{ti+1} {tubeColor.name}</text>);
+    fibers.forEach((fi,i)=>{
+      const ry=bandY+i*LED_ROW_H, cy=ry+LED_ROW_H/2;
+      const fb=getFiber(fi);
+      const spliced=!!splices[sk(ci,fi)];
+      els.push(<line key={`ln${fi}`} x1={x+1} y1={ry} x2={x+w-1} y2={ry} stroke="#cbd5e1" strokeWidth={0.4}/>);
+      // Fibre number sits at the inner edge (nearest the splice field);
+      // colour dot + name are centred in the remaining width, next to it.
+      const numX  = side==="left" ? x+w-7 : x+7;
+      const midC  = side==="left" ? x+(w-7-20)/2+14 : x+7+(w-7-20)/2+6;
+      const dotX  = side==="left" ? midC-30 : midC+30;
+      els.push(<circle key={`d${fi}`} cx={dotX} cy={cy} r={4.2} fill={fb.fiberColor.hex} stroke={outlineFor(fb.fiberColor.hex)} strokeWidth={0.9}/>);
+      els.push(<text key={`nm${fi}`} x={midC} y={cy} textAnchor="middle" dominantBaseline="central"
+        style={{fontSize:9,fill:"#1e293b"}}>{fb.fiberColor.name}</text>);
+      els.push(<text key={`no${fi}`} x={numX} y={cy} textAnchor={side==="left"?"end":"start"} dominantBaseline="central"
+        style={{fontSize:9,fontWeight:700,fill:spliced?"#15803d":"#64748b"}}>{fi+1}</text>);
+    });
+    seq+=fibers.length;
+  });
+  return <g key={`led-${ci}`}>{els}</g>;
+}
+
+// Splice path in ledger mode: short horizontal lead-out from each face, then
+// one shallow diagonal. Parallel groups stay parallel — no bends, no grid.
+function ledgerRoute(p1,p2,idx,laneRank,laneSpacing){
+  if(p1.side===p2.side){
+    // ── Same column ──
+    // Out horizontally, 45° into a dedicated vertical lane, along the lane,
+    // 45° back out, horizontally in. Lanes are ordered by span (shortest run
+    // innermost) and spaced to FIT INSIDE THE GUTTER, so they can never run
+    // past the opposite column and cross a cable face.
+    const dir  = p1.side==="left" ? 1 : -1;
+    const LEAD = 26;
+    const D    = 14;
+    const sp   = laneSpacing || 22;
+    const lane = LEAD + 26 + (laneRank||0)*sp;
+    const base = p1.side==="left" ? Math.max(p1.x,p2.x) : Math.min(p1.x,p2.x);
+    const xL   = base + dir*lane;
+    const down = p2.y > p1.y ? 1 : -1;
+    const a1 = {x:p1.x + dir*LEAD,  y:p1.y};
+    const a2 = {x:xL,               y:p1.y + down*D};
+    const b2 = {x:xL,               y:p2.y - down*D};
+    const b1 = {x:p2.x + dir*LEAD,  y:p2.y};
+    return [p1,a1,a2,b2,b1,p2];
+  }
+  const lead=60;
+  return [p1,
+          {x:p1.x+(p1.side==="left"? lead:-lead), y:p1.y},
+          {x:p2.x+(p2.side==="left"? lead:-lead), y:p2.y},
+          p2];
+}
 function sk(ci,fi) { return `${ci}:${fi}`; }
 function getTubes(cable) {
   return Array.from({length:Math.ceil(cable.size/12)},(_,ti)=>{
@@ -170,7 +341,6 @@ const LOGO_DISPLAY_URI = "data:image/webp;base64,UklGRkoQAABXRUJQVlA4ID4QAAAQSQC
 const LOGO_EXPORT_URI = "data:image/webp;base64,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";
 
 function LeeCountyLogo({ height=54, color="#ffffff" }) {
-  // Splice Matrix logo (embedded WebP). `color` kept for call-site compatibility.
   return (
     <img src={LOGO_DISPLAY_URI} alt="Splice Matrix"
       height={height}
@@ -178,12 +348,58 @@ function LeeCountyLogo({ height=54, color="#ffffff" }) {
   );
 }
 
-function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
+function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode, tubeColors, setTubeColors }) {
   const [selected, setSelected] = useState(null);
   const [hovered, setHovered] = useState(null);
+  const [hoverPt, setHoverPt] = useState(null);   // cursor position in SVG units
+  const [linkEnds, setLinkEnds] = useState(true); // colour both ends together
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  // Buffer tubes on the far side of any splice from this tube.
+  const linkedTubes = (ci,ti) => {
+    const out=new Set();
+    for(const [k,v] of Object.entries(splices)){
+      const [aci,afi]=k.split(":").map(Number);
+      if(aci===ci && Math.floor(afi/12)===ti){
+        const [bci,bfi]=v.split(":").map(Number);
+        out.add(`${bci}:${Math.floor(bfi/12)}`);
+      }
+    }
+    return [...out];
+  };
+  const applyTubeColor = (ci,ti,hex) => {
+    setTubeColors(tc=>{
+      const next={...tc, [`${ci}:${ti}`]:hex};
+      if(linkEnds) linkedTubes(ci,ti).forEach(k=>{ next[k]=hex; });
+      return next;
+    });
+  };
+  // Map a mouse event to SVG user coordinates so the tooltip can follow the
+  // cursor even when the canvas is zoomed and scrolled.
+  const svgPoint = (e) => {
+    const svg = diagramRef.current; if(!svg || !svg.getScreenCTM) return null;
+    const ctm = svg.getScreenCTM(); if(!ctm) return null;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(ctm.inverse());
+    return {x:p.x, y:p.y};
+  };
   const [zoom, setZoom] = useState(1);
   const [zoomInput, setZoomInput] = useState("100");
-  const {all: layouts, W: SVG_W, H: SVG_H} = buildLayouts(cables);
+  const isLedger = style==="ledger";
+  const LED = isLedger ? buildLedger(cables, splices) : null;
+  const compass = buildLayouts(cables);
+  const layouts = compass.all;
+  const SVG_W = isLedger ? LED.W : compass.W;
+  const SVG_H = isLedger ? LED.H : compass.H;
+  const port = (ci,fi) => isLedger ? ledgerPort(LED,ci,fi) : getFiberPort(layouts,ci,fi);
+  // Splice line colour: TIA-598 fibre colour, one colour per buffer tube, or a
+  // user-defined colour per buffer tube (falls back to the tube palette).
+  const spliceColor = (ci,fi) => {
+    if(colorMode==="fiber") return getFiber(fi).fiberColor.hex;
+    const key=`${ci}:${Math.floor(fi/12)}`;
+    if(colorMode==="custom" && tubeColors && tubeColors[key]) return tubeColors[key];
+    return routeColor(ci,fi);
+  };
   const TOTAL_H = SVG_H + TITLE_H;
 
   const PRESETS=[0.4,0.6,0.8,1.0,1.25,1.5,2.0];
@@ -192,11 +408,6 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   const nudge=(delta)=>applyZoom(Math.round(zoom*100)+delta);
 
   const scrollRef = useRef(null);
-  // Measured viewport height: fill from the top of the diagram window to the
-  // bottom of the browser window, so the diagram scrolls WITHIN this box and
-  // the page itself never needs a second scrollbar. Recomputed on resize and
-  // when the toolbar wraps. This replaces a fixed pixel estimate that couldn't
-  // account for every screen size / toolbar-wrap combination.
   const [viewH, setViewH] = useState(null);
   const recomputeViewH = useCallback(()=>{
     const el=scrollRef.current; if(!el) return;
@@ -206,15 +417,11 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   }, []);
   useEffect(()=>{
     recomputeViewH();
-    // Re-measure after the browser has painted, so we read the settled position
-    // (fonts, toolbar wrapping, and the optional info panel all affect `top`).
     const raf=requestAnimationFrame(recomputeViewH);
     const t=setTimeout(recomputeViewH, 120);
     window.addEventListener("resize", recomputeViewH);
     return ()=>{ window.removeEventListener("resize", recomputeViewH); cancelAnimationFrame(raf); clearTimeout(t); };
   }, [recomputeViewH]);
-  // The info panel appears above the toolbar when a fiber is hovered/selected,
-  // shifting the viewport down — re-measure so height stays exact.
   useEffect(()=>{ recomputeViewH(); }, [selected, hovered, recomputeViewH]);
   const panRef = useRef({active:false, sx:0, sy:0, sl:0, st:0, moved:false});
   const [panning, setPanning] = useState(false);
@@ -326,6 +533,72 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   const totalSplices=pairs.length;
   const totalFibers=cables.reduce((s,c)=>s+c.size,0);
 
+  // ── Detect full buffer-tube groups spliced 1:1 in the same order ──
+  // Those route as a rigid PARALLEL BUNDLE (straight out, one shared diagonal
+  // shift, straight in) so every strand stays parallel to its neighbours and a
+  // crossing reads as one clean X instead of a tangle in the middle.
+  const bundleKeyByFiber={};
+  const bundleList=[];
+  {
+    const tubeOf=(gi)=>Math.floor(gi/12);
+    const groups={};
+    for(const {aci,afi,bci,bfi} of pairs){
+      const ati=tubeOf(afi), bti=tubeOf(bfi);
+      const idA=`${aci}:${ati}`, idB=`${bci}:${bti}`;
+      const key = idA<idB ? `${idA}|${idB}` : `${idB}|${idA}`;
+      (groups[key]=groups[key]||[]).push({aci,afi,ati,bci,bfi,bti});
+    }
+    for(const [key,list] of Object.entries(groups)){
+      const f=list[0];
+      const cabA=cables[f.aci], cabB=cables[f.bci];
+      if(!cabA||!cabB) continue;
+      const tA=getTubes(cabA)[f.ati], tB=getTubes(cabB)[f.bti];
+      if(!tA||!tB) continue;
+      if(tA.fibers.length!==tB.fibers.length) continue;
+      if(list.length!==tA.fibers.length) continue;
+      let ok=true;
+      for(const s of list){
+        let aL,bL;
+        if(s.aci===f.aci && s.ati===f.ati){ aL=s.afi-f.ati*12; bL=s.bfi-f.bti*12; }
+        else { aL=s.bfi-f.ati*12; bL=s.afi-f.bti*12; }
+        if(aL<0||bL<0||aL!==bL){ ok=false; break; }
+      }
+      if(!ok) continue;
+      bundleList.push(key);
+      for(const s of list){
+        bundleKeyByFiber[`${s.aci}:${s.afi}`]=key;
+        bundleKeyByFiber[`${s.bci}:${s.bfi}`]=key;
+      }
+    }
+  }
+  const bundleIndexOf={};
+  bundleList.forEach((k,i)=>{ bundleIndexOf[k]=i; });
+  const nBundles=Math.max(bundleList.length,1);
+
+  // Rigid parallel-bundle path: every strand of the group shifts by the same
+  // amount, so they stay parallel end to end.
+  const bundlePts=(p1,ea,p2,eb,key)=>{
+    const bi=bundleIndexOf[key]||0;
+    const stagger=(bi-(nBundles-1)/2)*34;
+    const vert=(e)=>e==="north"||e==="south";
+    const SLOPE=1.1, MIN_HALF=40, MAX_HALF=260;
+    if(vert(ea)&&vert(eb)){
+      const shift=Math.abs(p2.x-p1.x);
+      const half=Math.min(MAX_HALF, Math.max(MIN_HALF, (shift*SLOPE)/2));
+      const sign=Math.sign(p2.y-p1.y)||1;
+      const mid=(p1.y+p2.y)/2 + stagger;
+      return [p1,{x:p1.x,y:mid-half*sign},{x:p2.x,y:mid+half*sign},p2];
+    }
+    if(!vert(ea)&&!vert(eb)){
+      const shift=Math.abs(p2.y-p1.y);
+      const half=Math.min(MAX_HALF, Math.max(MIN_HALF, (shift*SLOPE)/2));
+      const sign=Math.sign(p2.x-p1.x)||1;
+      const mid=(p1.x+p2.x)/2 + stagger;
+      return [p1,{x:mid-half*sign,y:p1.y},{x:mid+half*sign,y:p2.y},p2];
+    }
+    return null; // perpendicular handled by the multi-segment router below
+  };
+
   const selKey=selected?sk(selected.ci,selected.fi):null;
   const selDest=selKey?splices[selKey]:null;
   const selDP=selDest?selDest.split(":").map(Number):null;
@@ -353,6 +626,29 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
   }
 
   const focusActive = hovered!==null || !!selected;
+
+  // Rank same-column splices by vertical span: the shortest run gets the
+  // innermost lane, the longest the outermost, so their paths nest as
+  // concentric brackets rather than crossing one another.
+  const laneRankOf={};
+  let laneSpacing=22;
+  if(isLedger){
+    const same=[];
+    pairs.forEach(({aci,afi,bci,bfi},idx)=>{
+      const a=ledgerPort(LED,aci,afi), b=ledgerPort(LED,bci,bfi);
+      if(a&&b&&a.side===b.side) same.push({idx, side:a.side, span:Math.abs(b.y-a.y)});
+    });
+    let maxCount=0;
+    ["left","right"].forEach(sd=>{
+      const list=same.filter(s=>s.side===sd).sort((p,q)=>p.span-q.span);
+      maxCount=Math.max(maxCount,list.length);
+      list.forEach((s,i)=>{ laneRankOf[s.idx]=i; });
+    });
+    // The sheet already grew to fit these lanes (see ledgerGutter), so spacing
+    // stays comfortable; this clamp is just a safety net.
+    const usable = (LED.gutter||LED_MID) - 110;
+    laneSpacing = maxCount>1 ? Math.max(6, Math.min(22, usable/(maxCount-1))) : 22;
+  }
   const tbY = SVG_H;
   const legW = Math.min(330, SVG_W*0.4);
   const midX = legW + 10;
@@ -380,6 +676,62 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
         <button onClick={()=>{ const el=scrollRef.current; if(!el) return; const fit=Math.min((el.clientWidth-16)/SVG_W,(el.clientHeight-16)/TOTAL_H)*100; applyZoom(fit); }} style={{fontSize:10,padding:"3px 9px",borderRadius:5,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.text,cursor:"pointer"}}>Fit</button>
         <span style={{fontSize:10,color:T.textFaint,marginLeft:4}}>drag to pan · sheet stays white for print</span>
       </div>
+
+      {/* Per-buffer colour palette — lives here so you can recolour and see the
+          result without leaving the diagram. */}
+      {colorMode==="custom" && !paletteOpen && (
+        <button onClick={()=>setPaletteOpen(true)}
+          style={{fontSize:10,padding:"3px 10px",borderRadius:5,marginBottom:8,
+            border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.text,cursor:"pointer"}}>
+          🎨 Edit splice colours
+        </button>
+      )}
+      {colorMode==="custom" && paletteOpen && (
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,alignItems:"center",marginBottom:8,padding:"6px 8px",
+          border:`0.5px solid ${T.border}`,borderRadius:6,background:T.panelAlt}}>
+          <span style={{fontSize:10,fontWeight:700,color:T.textDim,marginRight:2}}>SPLICE COLOURS:</span>
+          <label title="Picking a colour also sets the buffer tube it splices to. Turn off to colour each end separately."
+            style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:9,color:T.text,cursor:"pointer",
+              border:`0.5px solid ${linkEnds?T.accentBorder:T.borderSoft}`,borderRadius:5,padding:"2px 6px",
+              background:linkEnds?T.accentBg:T.panel}}>
+            <input type="checkbox" checked={linkEnds} onChange={e=>setLinkEnds(e.target.checked)} style={{margin:0,cursor:"pointer"}}/>
+            <span style={{fontWeight:600}}>🔗 Link ends</span>
+          </label>
+          {cables.map((cab,ci)=>getTubes(cab).map(({ti,tubeColor})=>{
+            const key=`${ci}:${ti}`;
+            const val=tubeColors[key] || routeColor(ci, ti*12);
+            const cur=SPLICE_PALETTE.find(p=>p.hex.toLowerCase()===String(val).toLowerCase());
+            return (
+              <span key={key} title={`C${ci+1} ${cab.name} · BT${ti+1} ${tubeColor.name}`}
+                style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:9,color:T.text,
+                  border:`0.5px solid ${T.borderSoft}`,borderRadius:5,padding:"2px 5px",background:T.panel}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:tubeColor.hex,display:"inline-block",border:"0.5px solid rgba(128,128,128,0.5)"}}/>
+                <span style={{fontWeight:600}}>C{ci+1}</span>
+                <span style={{color:T.textDim}}>BT{ti+1}</span>
+                <span style={{width:11,height:11,borderRadius:3,background:val,display:"inline-block",border:"0.5px solid rgba(128,128,128,0.6)"}}/>
+                <select value={cur?cur.hex:val}
+                  onChange={e=>applyTubeColor(ci,ti,e.target.value)}
+                  style={{fontSize:9,padding:"1px 2px",border:`0.5px solid ${T.border}`,borderRadius:4,background:T.inputBg,color:T.text,cursor:"pointer"}}>
+                  {!cur && <option value={val} style={{background:T.inputBg,color:T.text}}>Custom</option>}
+                  {SPLICE_PALETTE.map((p,pi)=>(
+                    <option key={`${p.hex}-${pi}`} value={p.hex} style={{background:T.inputBg,color:T.text}}>{p.name}</option>
+                  ))}
+                </select>
+              </span>
+            );
+          }))}
+          <div style={{display:"flex",gap:6,marginLeft:"auto",alignItems:"center"}}>
+            <button onClick={()=>setTubeColors({})}
+              style={{fontSize:9,padding:"3px 8px",borderRadius:5,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.textDim,cursor:"pointer"}}>
+              Reset colours
+            </button>
+            <button onClick={()=>setPaletteOpen(false)} title="Hide the colour palette"
+              style={{fontSize:11,lineHeight:1,padding:"3px 9px",borderRadius:5,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.text,cursor:"pointer",fontWeight:700}}>
+              ✕ Done
+            </button>
+          </div>
+        </div>
+      )}
       {pairs.length===0&&cables.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:T.textDim,fontSize:13}}>No cables added yet.</div>}
       {pairs.length===0&&cables.length>0&&<div style={{textAlign:"center",padding:"20px 0",color:T.textDim,fontSize:12}}>No splices yet — add splices in the Matrix tab.</div>}
       <div ref={scrollRef}
@@ -404,15 +756,15 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
             <rect id="canvasBg" x="0" y="0" width={SVG_W} height={SVG_H} fill={SHEET_BG}/>
             <rect x="0" y="0" width={SVG_W} height={SVG_H} fill="url(#grid)"/>
 
-            {Object.values(layouts).map(L=>(L.edge==="north"||L.edge==="south")?renderHCable(L):renderVCable(L))}
+            {!isLedger && Object.values(layouts).map(L=>(L.edge==="north"||L.edge==="south")?renderHCable(L):renderVCable(L))}
 
             {pairs.map(({aci,afi,bci,bfi},idx)=>{
-              const p1=getFiberPort(layouts,aci,afi), p2=getFiberPort(layouts,bci,bfi);
+              const p1=port(aci,afi), p2=port(bci,bfi);
               if(!p1||!p2) return null;
-              const ea=layouts[aci]?.edge, eb=layouts[bci]?.edge;
-              if(!ea||!eb) return null;
-              const colorA=getFiber(afi).fiberColor.hex;
-              const colorB=getFiber(bfi).fiberColor.hex;
+              // Each end takes its own buffer-tube colour and the line blends
+              // between them, so you never have to match colours on both ends.
+              const colorA = spliceColor(aci,afi);
+              const colorB = spliceColor(bci,bfi);
               const sel=selected&&((selected.ci===aci&&selected.fi===afi)||(selected.ci===bci&&selected.fi===bfi));
               const hov=hovered===idx;
               const isFocus=sel||hov;
@@ -436,44 +788,85 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
                 s+=` L${last.x},${last.y}`;
                 return s;
               };
+              let pts, d;
+              if(isLedger){
+                pts=ledgerRoute(p1,p2,idx,laneRankOf[idx],laneSpacing);
+                d=pts.map((p,i)=>(i?`L${p.x},${p.y}`:`M${p.x},${p.y}`)).join(" ");
+              } else {
+              const ea=layouts[aci]?.edge, eb=layouts[bci]?.edge;
+              if(!ea||!eb) return null;
               const lane=((idx*13)%17-8)*4;
               const stub=44;
               const s1={x:p1.x+(ns(ea)?0:(ea==="west"?stub:-stub)), y:p1.y+(ns(ea)?(ea==="north"?stub:-stub):0)};
               const s2={x:p2.x+(ns(eb)?0:(eb==="west"?stub:-stub)), y:p2.y+(ns(eb)?(eb==="north"?stub:-stub):0)};
-              const diag=(s,edge,off)=>{
-                const a=Math.abs(off);
-                if(a<0.5) return [s];
-                const dir=Math.sign(off);
-                if(ns(edge)){ const stepY=(edge==="north"?1:-1)*a; return [s,{x:s.x+dir*a,y:s.y+stepY}]; }
-                else { const stepX=(edge==="west"?1:-1)*a; return [s,{x:s.x+stepX,y:s.y+dir*a}]; }
-              };
-              let pts;
-              if(ns(ea)&&ns(eb)){
+              const isPerp = (ns(ea)&&!ns(eb)) || (!ns(ea)&&ns(eb));
+              const bKey = bundleKeyByFiber[`${aci}:${afi}`] || bundleKeyByFiber[`${bci}:${bfi}`];
+              const bPts = bKey ? bundlePts(p1,ea,p2,eb,bKey) : null;
+              if(bPts){
+                pts=bPts;
+              } else if(ns(ea)&&ns(eb)){
                 if(Math.abs(p1.x-p2.x)<0.5){ pts=[p1,p2]; }
                 else { const midY=(s1.y+s2.y)/2+lane; pts=[p1,s1,{x:s1.x,y:midY},{x:s2.x,y:midY},s2,p2]; }
               } else if(!ns(ea)&&!ns(eb)){
                 if(Math.abs(p1.y-p2.y)<0.5){ pts=[p1,p2]; }
                 else { const midX=(s1.x+s2.x)/2+lane; pts=[p1,s1,{x:midX,y:s1.y},{x:midX,y:s2.y},s2,p2]; }
               } else {
-                if(ns(ea)){ pts=[p1,{x:p1.x,y:p2.y},p2]; }
-                else { pts=[p1,{x:p2.x,y:p1.y},p2]; }
+                // ── Perpendicular pair (N↔W, S↔E, …): 90° elbows ──
+                // Right angles are prioritised — they read far better on a
+                // printed sheet than diagonals. The corner sits where the
+                // vertical port's X meets the horizontal port's Y.
+                // For LONG runs the corner is staggered per strand so the
+                // corners don't stack on top of each other and every strand
+                // stays individually traceable.
+                const dx=Math.abs(p2.x-p1.x), dy=Math.abs(p2.y-p1.y);
+                const isLong = Math.max(dx,dy) > 420;
+                const step = isLong ? (afi%12)*9 : 0;   // stagger only when long
+
+                if(ns(ea)){
+                  // p1 on a top/bottom cable (vertical), p2 on a side cable
+                  const sgn = (ea==="north") ? 1 : -1;
+                  const cornerY = p2.y;                       // destination row
+                  const outY = p1.y + sgn*(24+step);          // straight off the port
+                  pts = step
+                    ? [p1,{x:p1.x,y:outY},{x:p1.x,y:cornerY},p2]
+                    : [p1,{x:p1.x,y:cornerY},p2];
+                } else {
+                  // p1 on a side cable (horizontal), p2 on a top/bottom cable
+                  const sgn = (ea==="west") ? 1 : -1;
+                  const cornerX = p2.x;                       // destination column
+                  const outX = p1.x + sgn*(24+step);
+                  pts = step
+                    ? [p1,{x:outX,y:p1.y},{x:cornerX,y:p1.y},p2]
+                    : [p1,{x:cornerX,y:p1.y},p2];
+                }
               }
-              const d=ortho(pts);
+              // Parallel bundles are diagonal by design and must bypass ortho().
+              d = bPts
+                ? pts.map((p,i)=>(i?`L${p.x},${p.y}`:`M${p.x},${p.y}`)).join(" ")
+                : ortho(pts);
+              }
               const gradId=`spl-grad-${idx}`;
               const strokeRef=colorA===colorB?colorA:`url(#${gradId})`;
               const midPt=pts[Math.floor(pts.length/2)]||p1;
               const midX2=midPt.x, midY2=midPt.y;
-              const tip=`C${aci+1} ${getFiber(afi).label} ⟷ C${bci+1} ${getFiber(bfi).label}`;
+              const nameA=(cables[aci]&&cables[aci].name)||`C${aci+1}`;
+              const nameB=(cables[bci]&&cables[bci].name)||`C${bci+1}`;
+              const tip=`${nameA} ${getFiber(afi).label} ⟷ ${nameB} ${getFiber(bfi).label}`;
               const tScale=1/zoom;
               const tw=tip.length*6.0+20;
               const th=21;
               const halfW=(tw*tScale)/2;
-              const tx=Math.min(Math.max(midX2,halfW+4),SVG_W-halfW-4);
-              const ty=midY2-14*tScale;
+              // Follow the cursor when hovering; fall back to the path midpoint.
+              const anchorX = (hov && hoverPt) ? hoverPt.x : midX2;
+              const anchorY = (hov && hoverPt) ? hoverPt.y : midY2;
+              const tx=Math.min(Math.max(anchorX,halfW+4),SVG_W-halfW-4);
+              const ty=anchorY-14*tScale;
               return(
                 <g key={idx}
                   onClick={()=>setSelected(s=>s&&s.ci===aci&&s.fi===afi?null:{ci:aci,fi:afi})}
-                  onMouseEnter={()=>setHovered(idx)} onMouseLeave={()=>setHovered(h=>h===idx?null:h)}
+                  onMouseEnter={(e)=>{ setHovered(idx); setHoverPt(svgPoint(e)); }}
+                  onMouseMove={(e)=>{ if(hovered===idx) setHoverPt(svgPoint(e)); }}
+                  onMouseLeave={()=>setHovered(h=>h===idx?null:h)}
                   style={{cursor:"pointer"}}>
                   {colorA!==colorB&&(
                     <linearGradient id={gradId} gradientUnits="userSpaceOnUse" x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}>
@@ -498,6 +891,10 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T }) {
                 </g>
               );
             })}
+
+            {/* Ledger faces render AFTER the splices so the fibre tables are
+                never obscured by lines passing behind them. */}
+            {isLedger && Object.values(LED.blocks).map(b=>renderLedgerCable(b, splices))}
 
             {/* ── Title block (always light for print) ── */}
             <g>
@@ -558,34 +955,38 @@ function App() {
   const [exportMsg, setExportMsg] = useState("");
   const [tab, setTab] = useState("matrix");
   const [dark, setDark] = useState(true);
+  const [diagStyle, setDiagStyle] = useState("ledger");
+  const [colorMode, setColorMode] = useState("fiber");   // fiber | tube | custom
+  const [tubeColors, setTubeColors] = useState({});      // "ci:ti" -> hex override
   const [loaded, setLoaded] = useState(false);
   const diagramRef = useRef(null);
   const fileInputRef = useRef(null);
   const T = dark ? THEMES.dark : THEMES.light;
   const DC = T.dirs;
 
-  // ── Load from localStorage on first mount ──
   useEffect(()=>{
     try {
       const raw=localStorage.getItem(STORAGE_KEY);
       if(raw){
         const d=JSON.parse(raw);
-        if(d.cables) setCables(d.cables);
+        if(d.cables) setCables(d.cables.map((c,i)=>({ ...c, side: c.side || (i%2? "right":"left") })));
         if(d.nodeInfo) setNodeInfo(d.nodeInfo);
         if(d.splices) setSplices(d.splices);
         if(typeof d.dark==="boolean") setDark(d.dark);
+        if(d.diagStyle) setDiagStyle(d.diagStyle);
+        if(d.colorMode) setColorMode(d.colorMode);
+        if(d.tubeColors) setTubeColors(d.tubeColors);
       }
     } catch(e){ console.warn("Load failed", e); }
     setLoaded(true);
   },[]);
 
-  // ── Auto-save to localStorage whenever data changes ──
   useEffect(()=>{
     if(!loaded) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ v:APP_VERSION, cables, nodeInfo, splices, dark }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ v:APP_VERSION, cables, nodeInfo, splices, dark, diagStyle, colorMode, tubeColors }));
     } catch(e){ console.warn("Save failed", e); }
-  },[cables, nodeInfo, splices, dark, loaded]);
+  },[cables, nodeInfo, splices, dark, diagStyle, colorMode, tubeColors, loaded]);
 
   const addCable=()=>{ if(cables.length<MAX_CABLES) setCables(c=>[...c,makeCable(c.length+1)]); };
   const updateCable=useCallback((idx,patch)=>{ setCables(c=>c.map((x,i)=>i===idx?{...x,...patch}:x)); },[]);
@@ -678,7 +1079,6 @@ function App() {
     img.src=svgB64;
   };
 
-  // ── Save / Load project as JSON file ──
   const saveProject=()=>{
     const data={ v:APP_VERSION, app:"Fiber Splice Matrix", saved:new Date().toISOString(), cables, nodeInfo, splices };
     const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
@@ -801,6 +1201,12 @@ function App() {
                     <select value={cab.size} onChange={e=>updateCable(ci,{size:Number(e.target.value)})} style={{fontSize:10,padding:"0 2px",height:20,width:42,border:`0.5px solid ${T.border}`,borderRadius:4,background:T.inputBg,color:T.text}}>
                       {CABLE_SIZES.map(s=><option key={s} value={s} style={{background:T.inputBg,color:T.text}}>{s}F</option>)}
                     </select>
+                    <select value={cab.side||"left"} onChange={e=>updateCable(ci,{side:e.target.value})}
+                      title="Which column this cable sits in on the Ledger diagram"
+                      style={{fontSize:10,padding:"0 2px",height:20,border:`0.5px solid ${T.border}`,borderRadius:4,background:T.inputBg,color:T.textDim}}>
+                      <option value="left" style={{background:T.inputBg,color:T.text}}>◧ L</option>
+                      <option value="right" style={{background:T.inputBg,color:T.text}}>◨ R</option>
+                    </select>
                     <button onClick={()=>removeCable(ci)} style={{background:"transparent",border:"none",cursor:"pointer",color:T.dangerText,fontSize:15,padding:"0 2px",lineHeight:1}}>×</button>
                   </div>
                   <div style={{display:"flex",gap:4,padding:"4px 8px",borderBottom:`0.5px solid ${T.borderSoft}`}}>
@@ -898,10 +1304,27 @@ function App() {
         <div style={{border:`0.5px solid ${T.border}`,borderRadius:10,overflow:"hidden",background:T.panel,margin:"0 8px"}}>
           <div style={{background:T.panelAlt,padding:"6px 12px",fontSize:11,fontWeight:500,color:T.text,borderBottom:`0.5px solid ${T.borderSoft}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <span>{nodeInfo.node} — {nodeInfo.enclosure} — Splice diagram</span>
-            <button onClick={exportDiagramPNG} style={{fontSize:11,padding:"3px 10px",borderRadius:6,border:`0.5px solid ${T.accentBorder}`,background:T.accentBg,color:T.accentText,cursor:"pointer",fontWeight:500}}>↓ Export PNG</button>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{display:"flex",border:`0.5px solid ${T.border}`,borderRadius:6,overflow:"hidden"}}>
+                {[["ledger","▤ Ledger"],["compass","✛ Compass"]].map(([v,label])=>(
+                  <button key={v} onClick={()=>setDiagStyle(v)}
+                    title={v==="ledger"?"Two-column layout — vertical faces only, no 90° splice bends":"Four-direction layout with a centre node"}
+                    style={{fontSize:10,padding:"3px 10px",border:"none",cursor:"pointer",fontWeight:diagStyle===v?700:400,
+                      background:diagStyle===v?"#1a56a0":T.btnBg, color:diagStyle===v?"#fff":T.text}}>{label}</button>
+                ))}
+              </div>
+              <select value={colorMode} onChange={e=>setColorMode(e.target.value)}
+                title="How splice lines are coloured"
+                style={{fontSize:10,padding:"3px 6px",borderRadius:6,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.text,cursor:"pointer"}}>
+                <option value="fiber"  style={{background:T.inputBg,color:T.text}}>🎨 Fiber colour code</option>
+                <option value="tube"   style={{background:T.inputBg,color:T.text}}>🎨 One colour per buffer</option>
+                <option value="custom" style={{background:T.inputBg,color:T.text}}>🎨 Custom per buffer</option>
+              </select>
+              <button onClick={exportDiagramPNG} style={{fontSize:11,padding:"3px 10px",borderRadius:6,border:`0.5px solid ${T.accentBorder}`,background:T.accentBg,color:T.accentText,cursor:"pointer",fontWeight:500}}>↓ Export PNG</button>
+            </div>
           </div>
           <div style={{padding:8}}>
-            <DiagramTab cables={cables} splices={splices} nodeInfo={nodeInfo} diagramRef={diagramRef} T={T}/>
+            <DiagramTab cables={cables} splices={splices} nodeInfo={nodeInfo} diagramRef={diagramRef} T={T} style={diagStyle} colorMode={colorMode} tubeColors={tubeColors} setTubeColors={setTubeColors}/>
           </div>
         </div>
       )}
@@ -911,48 +1334,35 @@ function App() {
 </script>
 
 <script>
-// This block runs as plain JS (it is NOT type="text/babel", so Babel does
-// not auto-execute the app before React is ready). We wait until React,
-// ReactDOM, AND Babel are all present, then transpile the JSX source and
-// run it ourselves. This guarantees `React` exists at the moment the app
-// module executes — the previous version could execute the JSX block's
-// top-level `= React` destructure before React had attached, throwing
-// "React is not defined".
 (function boot(tries){
   var ready = typeof React !== "undefined"
            && typeof ReactDOM !== "undefined"
            && typeof Babel !== "undefined";
   if (!ready) {
     if (tries > 200) {
-      document.getElementById("root").innerHTML =
-        '<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">'
-        + 'Could not load React/Babel from the network.\n\nIf you are offline, open the app once while '
-        + 'connected so it can cache. Otherwise check your internet connection and reload.</pre>';
+      var el = document.getElementById("root");
+      el.textContent = "Could not load React/Babel from the network.\n\nIf you are offline, open the app once while connected so it can cache. Otherwise check your internet connection and reload.";
+      el.style.cssText = "padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap";
       return;
     }
     return setTimeout(function(){ boot(tries+1); }, 50);
   }
   try {
     var src = document.getElementById("app-src").textContent;
-    // Force the CLASSIC runtime: JSX compiles to React.createElement(...)
-    // instead of importing "react/jsx-runtime" (which has no loader here).
-    var out = Babel.transform(src, {
-      presets: [["react", { runtime: "classic" }]]
-    }).code;
-    (0, eval)(out);            // App is now defined in this scope's closure via eval
+    var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+    (0, eval)(out);
     ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
   } catch (err) {
-    document.getElementById("root").innerHTML =
-      '<pre style="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap">Startup error:\n'
-      + (err && (err.message || err)) + '\n\n' + ((err && err.stack) || "") + '</pre>';
+    var el2 = document.getElementById("root");
+    el2.textContent = "Startup error:\n" + (err && (err.message || err)) + "\n\n" + ((err && err.stack) || "");
+    el2.style.cssText = "padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap";
   }
 })(0);
 </script>
 <script>
-  // Register the service worker so the app works offline after first load.
   if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js").catch(err => console.warn("SW registration failed:", err));
+    window.addEventListener("load", function(){
+      navigator.serviceWorker.register("sw.js").catch(function(err){ console.warn("SW registration failed:", err); });
     });
   }
 </script>
