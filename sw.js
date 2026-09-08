@@ -2,7 +2,7 @@
 // Caches the app shell + CDN libraries so the tool runs fully offline
 // after the first successful load. Bump CACHE_VERSION to force an update.
 
-const CACHE_VERSION = "splice-matrix-v6";
+const CACHE_VERSION = "splice-matrix-v7";
 
 // Everything needed to run with no network. The three unpkg URLs are the
 // React / ReactDOM / Babel libraries the app loads; caching them here is what
@@ -19,6 +19,7 @@ const ASSETS = [
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
   "https://unpkg.com/@babel/standalone/babel.min.js",
+  "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"
 ];
 
 // Install: pre-cache the app shell and libraries.
