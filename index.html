@@ -19,6 +19,7 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>window.addEventListener("error",function(e){var r=document.getElementById("root");if(r&&!r.hasChildNodes()){r.textContent="Startup error:\n"+(e.message||e.error)+"\n\n"+((e.error&&e.error.stack)||"");r.style.cssText="padding:20px;font:13px monospace;color:#b91c1c;white-space:pre-wrap";}});</script>
 </head>
 <body>
 <div id="root"></div>
@@ -131,7 +132,125 @@ function routeColor(ci, fi){
   return PALETTE_24[(ti + ci*5) % PALETTE_24.length].hex;
 }
 
-// ══ Ledger (two-column) layout ══════════════════════════════════════════
+// ── Excel (.xlsx) workbook export ───────────────────────────────────────
+// Module-level so scope is unambiguous. Loads the styled-xlsx library on
+// demand, so a slow or unreachable CDN can never affect app start-up.
+function loadXLSXLib(){
+  return new Promise((resolve,reject)=>{
+    if(typeof XLSX!=="undefined") return resolve(window.XLSX);
+    const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js";
+    s.onload=()=> (typeof XLSX!=="undefined") ? resolve(window.XLSX) : reject(new Error("XLSX missing"));
+    s.onerror=()=>reject(new Error("Could not load Excel library"));
+    document.head.appendChild(s);
+  });
+}
+
+async function exportWorkbook(cables, splices, nodeInfo, setMsg, csvFallback){
+  setMsg("Building workbook…");
+  let X;
+  try { X = await loadXLSXLib(); }
+  catch(e){ csvFallback(); setMsg("Excel library unavailable — exported CSV"); setTimeout(()=>setMsg(""),4000); return; }
+
+  const argb=(hex)=>"FF"+String(hex).replace("#","").toUpperCase();
+  const inkOn=(hex)=>{
+    const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+    return ((0.299*r+0.587*g+0.114*b)/255)>0.6 ? "FF111111" : "FFFFFFFF";
+  };
+  const thin={style:"thin",color:{rgb:"FFD0D7DE"}};
+  const border={top:thin,bottom:thin,left:thin,right:thin};
+  const HEAD={ font:{bold:true,color:{rgb:"FFFFFFFF"},sz:11},
+               fill:{patternType:"solid",fgColor:{rgb:"FF1A5276"}},
+               alignment:{horizontal:"center",vertical:"center",wrapText:true}, border };
+
+  // Sheet 1 — every fibre
+  const head=["Cable No","Cable Name","Direction","Side","Size","Location",
+              "Buffer Tube No","Buffer Tube Color","Fiber No","Fiber Color","Fiber ID",
+              "Status","Spliced To Cable","Spliced To Buffer","Spliced To Fiber"];
+  const rows=[head], paint=[];
+  cables.forEach((cab,ci)=>{
+    getTubes(cab).forEach(({ti,tubeColor,fibers})=>{
+      fibers.forEach(fi=>{
+        const fb=getFiber(fi), dest=splices[sk(ci,fi)];
+        let toCable="", toTube="", toFiber="";
+        if(dest){
+          const [dci,dfi]=dest.split(":").map(Number), dfb=getFiber(dfi);
+          toCable=`C${dci+1} ${(cables[dci]&&cables[dci].name)||""}`;
+          toTube=`BT${dfb.tube+1} ${dfb.tubeColor.name}`;
+          toFiber=`F${dfi+1} ${dfb.fiberColor.name}`;
+        }
+        rows.push([ci+1,cab.name,cab.direction,(cab.side==="right"?"Right":"Left"),cab.size+"F",cab.location||"",
+                   ti+1,tubeColor.name,fi+1,fb.fiberColor.name,fb.label,
+                   dest?"Spliced":"Open",toCable,toTube,toFiber]);
+        const r=rows.length-1;
+        paint.push({r,c:7,fill:argb(tubeColor.hex),ink:inkOn(tubeColor.hex)});
+        paint.push({r,c:9,fill:argb(fb.fiberColor.hex),ink:inkOn(fb.fiberColor.hex)});
+        if(dest) paint.push({r,c:11,fill:"FFDCFCE7",ink:"FF14532D"});
+      });
+    });
+  });
+  const ws=X.utils.aoa_to_sheet(rows);
+  ws["!cols"]=[{wch:8},{wch:22},{wch:10},{wch:7},{wch:7},{wch:22},{wch:14},{wch:16},{wch:8},{wch:12},{wch:11},{wch:9},{wch:24},{wch:18},{wch:16}];
+  ws["!autofilter"]={ref:X.utils.encode_range({s:{r:0,c:0},e:{r:rows.length-1,c:head.length-1}})};
+  ws["!views"]=[{state:"frozen",ySplit:1}];
+  for(let c=0;c<head.length;c++){ const a=X.utils.encode_cell({r:0,c}); if(ws[a]) ws[a].s=HEAD; }
+  for(let r=1;r<rows.length;r++) for(let c=0;c<head.length;c++){
+    const a=X.utils.encode_cell({r,c}); if(ws[a]) ws[a].s={border,font:{sz:10},alignment:{vertical:"center"}};
+  }
+  paint.forEach(({r,c,fill,ink})=>{ const a=X.utils.encode_cell({r,c});
+    if(ws[a]) ws[a].s={border,font:{sz:10,bold:true,color:{rgb:ink}},
+                       fill:{patternType:"solid",fgColor:{rgb:fill}},
+                       alignment:{horizontal:"center",vertical:"center"}}; });
+
+  // Sheet 2 — splice schedule
+  const h2=["#","Cable A","Dir A","Buffer Tube A","Fiber A","Cable B","Dir B","Buffer Tube B","Fiber B"];
+  const r2=[h2], paint2=[]; const seen=new Set(); let n=0;
+  for(const [k,v] of Object.entries(splices)){
+    if(seen.has(k)||seen.has(v)) continue; seen.add(k); seen.add(v);
+    const [aci,afi]=k.split(":").map(Number),[bci,bfi]=v.split(":").map(Number);
+    const A=getFiber(afi),B=getFiber(bfi),ca=cables[aci],cb=cables[bci];
+    if(!ca||!cb) continue; n++;
+    r2.push([n,`C${aci+1} ${ca.name}`,ca.direction,`BT${A.tube+1} ${A.tubeColor.name}`,`F${afi+1} ${A.fiberColor.name}`,
+               `C${bci+1} ${cb.name}`,cb.direction,`BT${B.tube+1} ${B.tubeColor.name}`,`F${bfi+1} ${B.fiberColor.name}`]);
+    const r=r2.length-1;
+    paint2.push({r,c:3,fill:argb(A.tubeColor.hex),ink:inkOn(A.tubeColor.hex)});
+    paint2.push({r,c:4,fill:argb(A.fiberColor.hex),ink:inkOn(A.fiberColor.hex)});
+    paint2.push({r,c:7,fill:argb(B.tubeColor.hex),ink:inkOn(B.tubeColor.hex)});
+    paint2.push({r,c:8,fill:argb(B.fiberColor.hex),ink:inkOn(B.fiberColor.hex)});
+  }
+  const ws2=X.utils.aoa_to_sheet(r2);
+  ws2["!cols"]=[{wch:5},{wch:24},{wch:9},{wch:18},{wch:16},{wch:24},{wch:9},{wch:18},{wch:16}];
+  ws2["!autofilter"]={ref:X.utils.encode_range({s:{r:0,c:0},e:{r:Math.max(r2.length-1,1),c:h2.length-1}})};
+  ws2["!views"]=[{state:"frozen",ySplit:1}];
+  for(let c=0;c<h2.length;c++){ const a=X.utils.encode_cell({r:0,c}); if(ws2[a]) ws2[a].s=HEAD; }
+  for(let r=1;r<r2.length;r++) for(let c=0;c<h2.length;c++){
+    const a=X.utils.encode_cell({r,c}); if(ws2[a]) ws2[a].s={border,font:{sz:10},alignment:{vertical:"center"}};
+  }
+  paint2.forEach(({r,c,fill,ink})=>{ const a=X.utils.encode_cell({r,c});
+    if(ws2[a]) ws2[a].s={border,font:{sz:10,bold:true,color:{rgb:ink}},
+                         fill:{patternType:"solid",fgColor:{rgb:fill}},
+                         alignment:{horizontal:"center",vertical:"center"}}; });
+
+  // Sheet 3 — job info
+  const r3=[["Fusion Splice Matrix"],[],
+    ["Location",nodeInfo.node||""],["Enclosure",nodeInfo.enclosure||""],
+    ["Address",nodeInfo.address||""],["Hand Hole #",nodeInfo.handhole||""],
+    ["Cables",cables.length],["Total fibers",cables.reduce((s,c)=>s+c.size,0)],
+    ["Fusion splices",n],["Exported",new Date().toLocaleString()]];
+  const ws3=X.utils.aoa_to_sheet(r3);
+  ws3["!cols"]=[{wch:18},{wch:44}];
+  if(ws3["A1"]) ws3["A1"].s={font:{bold:true,sz:14,color:{rgb:"FF1A5276"}}};
+  for(let r=2;r<r3.length;r++){ const a=X.utils.encode_cell({r,c:0}); if(ws3[a]) ws3[a].s={font:{bold:true,sz:10}}; }
+
+  const wb=X.utils.book_new();
+  X.utils.book_append_sheet(wb, ws,  "Fiber Detail");
+  X.utils.book_append_sheet(wb, ws2, "Splice Schedule");
+  X.utils.book_append_sheet(wb, ws3, "Job Info");
+  X.writeFile(wb, `splice_matrix_${(nodeInfo.node||"node").replace(/\s+/g,"_")}.xlsx`);
+  setMsg("Exported Excel workbook"); setTimeout(()=>setMsg(""),3000);
+}
+
+// ── Ledger (two-column) layout ══════════════════════════════════════════
 // Per Splice.me guidance: cable faces are vertical only, arranged in two
 // columns with the splice field between them. No horizontal faces means no
 // 90° splice bends and no rectangular intersection grid, so every strand
@@ -392,6 +511,11 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
   const SVG_W = isLedger ? LED.W : compass.W;
   const SVG_H = isLedger ? LED.H : compass.H;
   const port = (ci,fi) => isLedger ? ledgerPort(LED,ci,fi) : getFiberPort(layouts,ci,fi);
+  // Title block scales with sheet width: the bar grows only modestly while the
+  // text scales up, so it stays readable on a very wide diagram without eating
+  // print space.
+  const tbK   = Math.max(1, Math.min(2.2, SVG_W/1500));
+  const TB_H  = Math.round(TITLE_H * Math.max(1, Math.min(1.6, SVG_W/1700)));
   // Splice line colour: TIA-598 fibre colour, one colour per buffer tube, or a
   // user-defined colour per buffer tube (falls back to the tube palette).
   const spliceColor = (ci,fi) => {
@@ -400,7 +524,7 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
     if(colorMode==="custom" && tubeColors && tubeColors[key]) return tubeColors[key];
     return routeColor(ci,fi);
   };
-  const TOTAL_H = SVG_H + TITLE_H;
+  const TOTAL_H = SVG_H + TB_H;
 
   const PRESETS=[0.4,0.6,0.8,1.0,1.25,1.5,2.0];
   const applyZoom=(pct)=>{ const v=Math.min(400,Math.max(10,Math.round(Number(pct)||100))); setZoom(v/100); setZoomInput(String(v)); };
@@ -662,9 +786,9 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
     laneSpacing = maxCount>1 ? Math.max(6, Math.min(22, usable/(maxCount-1))) : 22;
   }
   const tbY = SVG_H;
-  const legW = Math.min(330, SVG_W*0.4);
-  const midX = legW + 10;
-  const rightX = SVG_W - 235;
+  const legW = Math.min(330*tbK, SVG_W*0.4);
+  const midX = legW + 10*tbK;
+  const rightX = SVG_W - 235*tbK;
 
   return (
     <div>
@@ -910,44 +1034,47 @@ function DiagramTab({ cables, splices, nodeInfo, diagramRef, T, style, colorMode
 
             {/* ── Title block (always light for print) ── */}
             <g>
-              <rect x={0} y={tbY} width={SVG_W} height={TITLE_H} fill="#f8fafc" stroke="#94a3b8" strokeWidth={1}/>
-              <line x1={legW} y1={tbY} x2={legW} y2={tbY+TITLE_H} stroke="#cbd5e1" strokeWidth={1}/>
-              <line x1={rightX-10} y1={tbY} x2={rightX-10} y2={tbY+TITLE_H} stroke="#cbd5e1" strokeWidth={1}/>
-              <text x={10} y={tbY+13} style={{fontSize:8,fontWeight:700,fill:"#334155",letterSpacing:"0.08em"}}>TIA-598 FIBER / BUFFER TUBE COLOR CODE</text>
+              <rect x={0} y={tbY} width={SVG_W} height={TB_H} fill="#f8fafc" stroke="#94a3b8" strokeWidth={1}/>
+              <line x1={legW} y1={tbY} x2={legW} y2={tbY+TB_H} stroke="#cbd5e1" strokeWidth={1}/>
+              <line x1={rightX-10*tbK} y1={tbY} x2={rightX-10*tbK} y2={tbY+TB_H} stroke="#cbd5e1" strokeWidth={1}/>
+              <text x={10*tbK} y={tbY+13*tbK} style={{fontSize:8*tbK,fontWeight:700,fill:"#334155",letterSpacing:"0.08em"}}>TIA-598 FIBER / BUFFER TUBE COLOR CODE</text>
               {FIBER_COLORS_12.map((c,i)=>{
-                const cxL=12+(i%6)*52, cyL=tbY+27+Math.floor(i/6)*17;
+                const cxL=12*tbK+(i%6)*52*tbK, cyL=tbY+27*tbK+Math.floor(i/6)*17*tbK;
                 return(
                   <g key={c.name}>
-                    <circle cx={cxL+4} cy={cyL} r={4.5} fill={c.hex} stroke="rgba(0,0,0,0.25)" strokeWidth={0.5}/>
-                    <text x={cxL+12} y={cyL} dominantBaseline="central" style={{fontSize:7.5,fill:"#334155"}}>{i+1} {c.name}</text>
+                    <circle cx={cxL+4*tbK} cy={cyL} r={4.5*tbK} fill={c.hex} stroke="rgba(0,0,0,0.25)" strokeWidth={0.5}/>
+                    <text x={cxL+12*tbK} y={cyL} dominantBaseline="central" style={{fontSize:7.5*tbK,fill:"#334155"}}>{i+1} {c.name}</text>
                   </g>
                 );
               })}
-              <text x={12} y={tbY+64} dominantBaseline="central" style={{fontSize:7.5,fontWeight:700,fill:"#334155"}}>DIR:</text>
+              <text x={12*tbK} y={tbY+64*tbK} dominantBaseline="central" style={{fontSize:7.5*tbK,fontWeight:700,fill:"#334155"}}>DIR:</text>
               {DIRECTIONS.map((dname,i)=>(
                 <g key={dname}>
-                  <rect x={36+i*66} y={tbY+59} width={10} height={10} rx={2} fill={DIR_COLORS[dname]}/>
-                  <text x={50+i*66} y={tbY+64} dominantBaseline="central" style={{fontSize:7.5,fill:"#334155"}}>{dname}</text>
+                  <rect x={36*tbK+i*66*tbK} y={tbY+59*tbK} width={10*tbK} height={10*tbK} rx={2} fill={DIR_COLORS[dname]}/>
+                  <text x={50*tbK+i*66*tbK} y={tbY+64*tbK} dominantBaseline="central" style={{fontSize:7.5*tbK,fill:"#334155"}}>{dname}</text>
                 </g>
               ))}
               {(()=>{
-                const bx=midX+6, bw=(rightX-10)-(midX+6)-8, by=tbY+8, bh=TITLE_H-16;
+                const bx=midX+6*tbK, bw=(rightX-10*tbK)-(midX+6*tbK)-8*tbK, by=tbY+8*tbK, bh=TB_H-16*tbK;
+                // Two columns inside the box, positioned relative to its height
+                // so the text can never run past the bottom edge.
+                const colL=bx+14*tbK, colR=bx+bw*0.52;
                 return (
                   <g>
                     <rect x={bx} y={by} width={bw} height={bh} rx={6} fill="url(#nodeFill)" stroke="#0d3c7a" strokeWidth={1}/>
-                    <rect x={bx} y={by} width={bw} height={6} rx={3} fill="#fff" fillOpacity={0.14}/>
-                    <text x={bx+12} y={by+13} dominantBaseline="central" style={{fontSize:8,fontWeight:700,fill:"#bcd6f5",letterSpacing:"0.1em"}}>FUSION SPLICE DIAGRAM</text>
-                    <text x={bx+12} y={by+28} dominantBaseline="central" style={{fontSize:13,fontWeight:700,fill:"#ffffff"}}>{nodeInfo.node}{nodeInfo.enclosure?`  ·  ${nodeInfo.enclosure}`:""}</text>
-                    <text x={bx+12} y={by+42} dominantBaseline="central" style={{fontSize:9,fill:"#dce9fb"}}>{nodeInfo.address||"—"}{nodeInfo.handhole?`   ·   Hand Hole ${nodeInfo.handhole}`:""}</text>
-                    <text x={bx+12} y={by+53} dominantBaseline="central" style={{fontSize:8.5,fill:"#a9c7ee"}}>Cables: {cables.length}  ·  Fibers: {totalFibers}  ·  Splices: {totalSplices}</text>
+                    <rect x={bx} y={by} width={bw} height={6*tbK} rx={3} fill="#fff" fillOpacity={0.14}/>
+                    <text x={colL} y={by+bh*0.32} dominantBaseline="central" style={{fontSize:8*tbK,fontWeight:700,fill:"#bcd6f5",letterSpacing:"0.1em"}}>FUSION SPLICE DIAGRAM</text>
+                    <text x={colL} y={by+bh*0.68} dominantBaseline="central" style={{fontSize:13*tbK,fontWeight:700,fill:"#ffffff"}}>{nodeInfo.node}{nodeInfo.enclosure?`  ·  ${nodeInfo.enclosure}`:""}</text>
+                    <text x={colR} y={by+bh*0.36} dominantBaseline="central" style={{fontSize:9*tbK,fill:"#dce9fb"}}>{nodeInfo.address||"—"}{nodeInfo.handhole?`   ·   Hand Hole ${nodeInfo.handhole}`:""}</text>
+                    <text x={colR} y={by+bh*0.70} dominantBaseline="central" style={{fontSize:8.5*tbK,fill:"#a9c7ee"}}>Cables: {cables.length}  ·  Fibers: {totalFibers}  ·  Splices: {totalSplices}</text>
                   </g>
                 );
               })()}
               <image href={LOGO_EXPORT_URI} xlinkHref={LOGO_EXPORT_URI}
-                x={rightX-2} y={tbY+4} width={40} height={40}
+                x={rightX-2*tbK} y={tbY+4*tbK} width={40*tbK} height={40*tbK}
                 preserveAspectRatio="xMidYMid meet"/>
-              <text x={rightX} y={tbY+59} style={{fontSize:8,fill:"#475569"}}>Date: {new Date().toLocaleDateString()}</text>
-              <text x={rightX} y={tbY+69} style={{fontSize:7,fill:"#94a3b8"}}>Generated by Splice Matrix</text>
+              <text x={rightX} y={tbY+59*tbK} style={{fontSize:8*tbK,fill:"#475569"}}>Date: {new Date().toLocaleDateString()}</text>
+              <text x={rightX} y={tbY+69*tbK} style={{fontSize:7*tbK,fill:"#94a3b8"}}>Generated by Splice Matrix</text>
             </g>
           </svg>
         </div>
@@ -1164,7 +1291,8 @@ function App() {
           <div style={{display:"flex",flexDirection:"column",gap:4,paddingBottom:1}}>
             <div style={{display:"flex",gap:6}}>
               <button onClick={addCable} disabled={cables.length>=MAX_CABLES} style={{fontSize:11,padding:"4px 10px",borderRadius:6,border:`0.5px solid ${T.border}`,background:T.btnBg,color:cables.length>=MAX_CABLES?T.textFaint:T.text,cursor:cables.length>=MAX_CABLES?"not-allowed":"pointer"}}>+ Cable</button>
-              <button onClick={exportCSV} style={{fontSize:11,padding:"4px 10px",borderRadius:6,border:`0.5px solid ${T.accentBorder}`,background:T.accentBg,color:T.accentText,cursor:"pointer",fontWeight:500}}>↓ Export Excel</button>
+              <button onClick={()=>exportWorkbook(cables,splices,nodeInfo,setExportMsg,exportCSV)} title="Formatted workbook: coloured cells, filters, splice schedule" style={{fontSize:11,padding:"4px 10px",borderRadius:6,border:`0.5px solid ${T.accentBorder}`,background:T.accentBg,color:T.accentText,cursor:"pointer",fontWeight:500}}>↓ Export Excel</button>
+              <button onClick={exportCSV} title="Plain CSV" style={{fontSize:11,padding:"4px 8px",borderRadius:6,border:`0.5px solid ${T.border}`,background:T.btnBg,color:T.textDim,cursor:"pointer"}}>CSV</button>
             </div>
             {!confirmDelete
               ? <button onClick={()=>{ if(Object.keys(splices).length>0) setConfirmDelete(true); }} disabled={Object.keys(splices).length===0}
