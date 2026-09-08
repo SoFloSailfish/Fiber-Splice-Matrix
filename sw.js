@@ -2,7 +2,7 @@
 // Caches the app shell + CDN libraries so the tool runs fully offline
 // after the first successful load. Bump CACHE_VERSION to force an update.
 
-const CACHE_VERSION = "splice-matrix-v7";
+const CACHE_VERSION = "splice-matrix-v8";
 
 // Everything needed to run with no network. The three unpkg URLs are the
 // React / ReactDOM / Babel libraries the app loads; caching them here is what
